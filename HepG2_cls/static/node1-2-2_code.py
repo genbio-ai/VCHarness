@@ -1,0 +1,1010 @@
+"""Node 1-2-2: STRING_GNN Frozen Embeddings + 3-Block Pre-Norm MLP (h=384)
+               + Muon Optimizer + FOCAL LOSS (gamma=2.0) + CosineAnnealingWarmRestarts (T_0=40)
+               + Manifold Mixup + Agressive Regularization (wd=0.06, head_dropout=0.15)
+================================================================
+Parent  : node1-2 (test F1=0.4884)
+          STRING_GNN + 3-block h=384 + Muon + FocalLoss(gamma=2.5) + CosineWR(T_0=80)
+          + head_dropout=0.08 + wd=0.02 + gene_bias (19920 params)
+
+Key problems of parent identified in feedback:
+ - EXTREME overfitting (13.04x train/val loss gap, worst in lineage)
+ - Focal gamma=2.5 is the primary driver of overfitting (suppresses easy-sample gradient)
+ - Weight decay 0.02 insufficient despite increase from 0.01
+ - Head dropout 0.08 insufficient to prevent output head memorization
+ - gene_bias (19,920 per-gene params) is the dominant memorization source
+ - T_0=80 too long: allows 80 epochs of deep overfitting before first restart
+ - Patience=50 too lenient: allowed 50 overfitting epochs after best checkpoint
+ - Val-test gap of 0.0547: val_f1=0.5431 is inflated 5.5pp above test_f1=0.4884
+
+Changes in this node vs parent
+-------------------------------------------------
+1. FOCAL GAMMA: 2.5 -> 2.0  [ANTI-OVERFITTING - KEY FIX]
+   Parent feedback (Priority 1): reduce gamma back to 2.0-2.2.
+   gamma=2.5 suppresses easy-sample gradients by 4.5x more than gamma=2.0
+   (p_t=0.95 easy samples: weight 0.00056x vs 0.0025x). This drives train loss
+   to 0.005 (40x below sibling node1-1's 0.207) causing extreme memorization.
+   The tree-best node (F1=0.5072) used gamma=2.0. Reverting to 2.0 allows the model
+   to learn from easy samples, produces higher training loss, and better val-test alignment.
+
+2. WEIGHT DECAY: 0.02 -> 0.06  [AGGRESSIVE REGULARIZATION]
+   Parent feedback (Priority 2): increase weight decay to 0.05-0.10.
+   Despite doubling wd from parent's 0.01 to 0.02, overfitting INCREASED from 7.31x to 13.04x.
+   The Muon optimizer requires much stronger L2 penalty to prevent memorization.
+   wd=0.06 applies 3x more L2 pressure than current, targeting the gap between
+   current insufficient regularization and the feedback's recommended 0.05-0.10 range.
+
+3. HEAD DROPOUT: 0.08 -> 0.15  [TARGETED OUTPUT HEAD REGULARIZATION]
+   Parent feedback (Priority 2): increase head dropout to 0.15-0.25.
+   The output head (74% of trainable params) is the dominant overfitting source.
+   node1-3-2-2-1 achieved the STRING-only ceiling (F1=0.4777) with exactly head_dropout=0.15.
+   This is the proven optimal value from extensive search tree experience.
+   0.08 was insufficient; 0.15 is the confirmed sweet spot from independent evidence.
+
+4. REMOVE PER-GENE GENE_BIAS: 19920 params -> 3 params (class-level only) [MEMORIZATION REMOVAL]
+   Parent feedback (Priority 2): "remove gene_bias in favor of class-level only biases".
+   The per-gene bias (19,920 parameters = 6640 genes x 3 classes) is identified as the
+   PRIMARY memorization source in the parent feedback. Each gene gets its own independent
+   trainable offset, enabling the model to memorize training gene-response patterns without
+   learning transferable features. Replacing with a single [3]-dim class-level bias eliminates
+   this memorization pathway while preserving class rebalancing capability.
+
+5. MANIFOLD MIXUP: alpha=0.2, prob=0.5  [REGULARIZATION + INTERPOLATION]
+   Inspired by node1-3-3 (STRING-only, F1=0.4950, +0.019 over sibling) which used
+   Manifold Mixup (prob=0.5, alpha=0.2) with head_dropout=0.15 and CosineWarmRestarts.
+   Manifold Mixup interpolates in the hidden MLP space (after input projection), creating
+   convex combinations of samples that prevent memorization and smooth decision boundaries.
+   Applied to hidden representations (not input embeddings) to avoid corrupting biological
+   STRING_GNN features. This is the most proven regularization for this architecture.
+   Note: node1-3-2-3 showed Manifold Mixup can HURT with wrong hyperparameters - we use
+   prob=0.5 (not 0.65+) and combine with strong L2 regularization to prevent over-smoothing.
+
+6. COSINE T_0: 80 -> 40  [MORE FREQUENT WARM RESTARTS]
+   Parent feedback (Priority 4): reduce T_0 from 80 to 30-40 epochs.
+   The 80-epoch first cycle allowed too much overfitting before the first warm restart.
+   T_0=40 provides warm restarts at epochs 40, 120, 280 (T_mult=2), providing
+   more frequent exploration opportunities while keeping the model closer to a
+   well-regularized region. First restart fires 2x sooner, catching overfitting earlier.
+
+7. EARLY STOP PATIENCE: 50 -> 20  [AGGRESSIVE EARLY STOPPING]
+   Parent feedback (Priority 3): reduce patience from 50 to 15-20.
+   The current patience allowed 50+ overfitting epochs after the best checkpoint.
+   With T_0=40, patience=20 allows the model half a cycle after the best before stopping.
+   This stops training closer to the true test-optimal region.
+
+8. MAX EPOCHS: 600 -> 300  [TRAINING BUDGET CALIBRATION]
+   With stronger regularization and aggressive early stopping, 300 epochs is sufficient.
+   The parent ran 431 epochs and best checkpoint was at 381 -- only because overfitting
+   continued past the test-optimal point. With better regularization, convergence should
+   happen earlier and the val-test gap should narrow.
+
+Preserved from parent (node1-2):
+-----------------------------------------------------------
+- STRING_GNN frozen PPI graph embeddings (256-dim) -- ESM2 NOT used (all zeros in files)
+- Pre-norm residual block structure (3 blocks, h=384, inner=768) -- proven optimal
+- Trunk dropout=0.30 -- proven optimal
+- Muon+AdamW dual optimizer (Muon LR=0.01, AdamW LR=3e-4) -- proven, better than AdamW-only
+- Muon momentum=0.95
+- Gradient clip=2.0 -- proven for Muon
+- Class-weight order: [0.0477, 0.9282, 0.0241] (down/neutral/up) -- correct label shift
+- val_f1 metric name (no slash) + auto_insert_metric_name=False -- confirmed working
+- Label smoothing=0.0 -- essential for focal loss
+- Best single checkpoint for test (ensemble provides zero benefit)
+- CosineAnnealingWarmRestarts (T_mult=2, eta_min=1e-7)
+
+Distinct from sibling node1-1:
+  - node1-1: ESM2-650M dual fusion (all zeros, harmful), different loss/architecture
+  - This node: STRING-only, Manifold Mixup, stronger regularization, gamma=2.0
+"""
+import os
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+
+import argparse
+import json
+from datetime import timedelta
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.distributed as dist
+import lightning.pytorch as pl
+from lightning.pytorch import LightningDataModule, LightningModule
+from lightning.pytorch.callbacks import (
+    EarlyStopping,
+    LearningRateMonitor,
+    ModelCheckpoint,
+)
+from lightning.pytorch.callbacks.progress import TQDMProgressBar
+from lightning.pytorch.loggers import CSVLogger, TensorBoardLogger
+from lightning.pytorch.strategies import DDPStrategy
+from torch.utils.data import DataLoader, Dataset
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+STRING_GNN_DIR = "/home/Models/STRING_GNN"
+N_GENES = 6640        # number of response genes per perturbation
+N_CLASSES = 3         # down (-1->0), neutral (0->1), up (1->2)
+GNN_DIM = 256         # STRING_GNN output embedding dimension
+HIDDEN_DIM = 384      # MLP hidden dimension -- proven optimal for STRING-only
+INNER_DIM = 768       # MLP inner (expansion) dimension (2x hidden per PreLN block)
+
+
+# ---------------------------------------------------------------------------
+# Dataset
+# ---------------------------------------------------------------------------
+class PerturbDataset(Dataset):
+    """Each sample is one gene perturbation experiment in HepG2 cells."""
+
+    def __init__(self, df: pd.DataFrame) -> None:
+        self.pert_ids: List[str] = df["pert_id"].tolist()
+        self.symbols: List[str] = df["symbol"].tolist()
+
+        if "label" in df.columns:
+            # Labels in {-1,0,1} -> shift to {0,1,2}
+            labels = np.array(
+                [json.loads(x) for x in df["label"].tolist()], dtype=np.int64
+            )
+            self.labels: Optional[torch.Tensor] = torch.tensor(
+                labels + 1, dtype=torch.long
+            )
+        else:
+            self.labels = None
+
+    def __len__(self) -> int:
+        return len(self.pert_ids)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        item: Dict[str, Any] = {
+            "idx": idx,
+            "pert_id": self.pert_ids[idx],
+            "symbol": self.symbols[idx],
+        }
+        if self.labels is not None:
+            item["label"] = self.labels[idx]
+        return item
+
+
+# ---------------------------------------------------------------------------
+# DataModule
+# ---------------------------------------------------------------------------
+class PerturbDataModule(LightningDataModule):
+    def __init__(
+        self,
+        train_path: str,
+        val_path: str,
+        test_path: str,
+        micro_batch_size: int = 64,
+        num_workers: int = 4,
+    ) -> None:
+        super().__init__()
+        self.train_path = train_path
+        self.val_path = val_path
+        self.test_path = test_path
+        self.micro_batch_size = micro_batch_size
+        self.num_workers = num_workers
+
+        self.train_ds: Optional[PerturbDataset] = None
+        self.val_ds: Optional[PerturbDataset] = None
+        self.test_ds: Optional[PerturbDataset] = None
+
+    def setup(self, stage: Optional[str] = None) -> None:
+        train_df = pd.read_csv(self.train_path, sep="\t")
+        val_df = pd.read_csv(self.val_path, sep="\t")
+        test_df = pd.read_csv(self.test_path, sep="\t")
+
+        self.train_ds = PerturbDataset(train_df)
+        self.val_ds = PerturbDataset(val_df)
+        self.test_ds = PerturbDataset(test_df)
+
+    def train_dataloader(self) -> DataLoader:
+        return DataLoader(
+            self.train_ds,
+            batch_size=self.micro_batch_size,
+            shuffle=True,
+            num_workers=self.num_workers,
+            pin_memory=True,
+            drop_last=False,
+        )
+
+    def val_dataloader(self) -> DataLoader:
+        return DataLoader(
+            self.val_ds,
+            batch_size=self.micro_batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=True,
+        )
+
+    def test_dataloader(self) -> DataLoader:
+        return DataLoader(
+            self.test_ds,
+            batch_size=self.micro_batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=True,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Model Components
+# ---------------------------------------------------------------------------
+class PreNormResBlock(nn.Module):
+    """Pre-LayerNorm residual block (proven stable in node1-3-2 lineage).
+
+    Architecture:
+        output = x + LN(x) -> Linear(dim->inner) -> GELU -> Dropout
+                               -> Linear(inner->dim) -> Dropout
+    """
+
+    def __init__(self, dim: int, inner_dim: int, dropout: float = 0.30) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, inner_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(inner_dim, dim),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.net(x)
+
+
+# ---------------------------------------------------------------------------
+# LightningModule
+# ---------------------------------------------------------------------------
+class PerturbModule(LightningModule):
+    def __init__(
+        self,
+        hidden_dim: int = HIDDEN_DIM,
+        inner_dim: int = INNER_DIM,
+        n_blocks: int = 3,
+        dropout: float = 0.30,            # Trunk dropout (proven optimal)
+        head_dropout: float = 0.15,       # INCREASED: 0.08->0.15 (proven at node1-3-2-2-1)
+        muon_lr: float = 0.01,            # Proven stable Muon LR
+        adamw_lr: float = 3e-4,           # AdamW LR for non-block params
+        weight_decay: float = 0.06,       # INCREASED: 0.02->0.06 for strong regularization
+        label_smoothing: float = 0.0,     # Essential for focal loss
+        focal_gamma: float = 2.0,         # DECREASED: 2.5->2.0 to reduce overfitting
+        # CosineAnnealingWarmRestarts params
+        cosine_t0: int = 40,              # SHORTENED: 80->40 for more frequent restarts
+        cosine_t_mult: int = 2,           # Cycle length multiplier after each restart
+        cosine_eta_min: float = 1e-7,     # Minimum LR after annealing
+        grad_clip_norm: float = 2.0,      # Proven for Muon orthogonalized updates
+        # Manifold Mixup params
+        mixup_alpha: float = 0.2,         # Beta distribution alpha for mixing coefficient
+        mixup_prob: float = 0.5,          # Probability of applying mixup per batch
+    ) -> None:
+        super().__init__()
+        self.save_hyperparameters()
+
+        # Populated in setup()
+        self.input_proj: Optional[nn.Sequential] = None
+        self.blocks: Optional[nn.ModuleList] = None
+        self.output_head: Optional[nn.Sequential] = None
+        self.class_bias: Optional[nn.Parameter] = None  # Replaces gene_bias: [3] class-level
+
+        # STRING_GNN gene-ID -> embedding-row index
+        self.gnn_id_to_idx: Dict[str, int] = {}
+
+        # Metric accumulators
+        self._val_preds: List[torch.Tensor] = []
+        self._val_labels: List[torch.Tensor] = []
+        self._test_preds: List[torch.Tensor] = []
+        self._test_pert_ids: List[str] = []
+        self._test_symbols: List[str] = []
+
+    # ------------------------------------------------------------------
+    def setup(self, stage: Optional[str] = None) -> None:
+        """Build model and precompute frozen STRING_GNN node embeddings."""
+        from transformers import AutoModel
+
+        self.print("Loading STRING_GNN and computing frozen node embeddings ...")
+        gnn_model = AutoModel.from_pretrained(
+            STRING_GNN_DIR, trust_remote_code=True
+        )
+        gnn_model.eval()
+        gnn_model = gnn_model.to(self.device)
+
+        graph = torch.load(
+            Path(STRING_GNN_DIR) / "graph_data.pt",
+            map_location=self.device,
+        )
+        edge_index = graph["edge_index"].to(self.device)
+        edge_weight = graph.get("edge_weight")
+        if edge_weight is not None:
+            edge_weight = edge_weight.to(self.device)
+
+        with torch.no_grad():
+            gnn_out = gnn_model(edge_index=edge_index, edge_weight=edge_weight)
+
+        # Register as a non-trainable float32 buffer [18870, 256]
+        all_emb = gnn_out.last_hidden_state.detach().float()
+        self.register_buffer("gnn_embeddings", all_emb)
+
+        # Free GNN model memory
+        del gnn_model, gnn_out, graph, edge_index, edge_weight
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        self.print(f"STRING_GNN embeddings shape: {all_emb.shape}")
+
+        # Build ENSG-ID -> row-index mapping
+        node_names: List[str] = json.loads(
+            (Path(STRING_GNN_DIR) / "node_names.json").read_text()
+        )
+        self.gnn_id_to_idx = {name: i for i, name in enumerate(node_names)}
+        n_covered = len(self.gnn_id_to_idx)
+        self.print(f"STRING_GNN covers {n_covered} Ensembl gene IDs")
+
+        # ---- MLP architecture ----
+        hp = self.hparams
+        self.input_proj = nn.Sequential(
+            nn.LayerNorm(GNN_DIM),
+            nn.Linear(GNN_DIM, hp.hidden_dim),
+            nn.GELU(),
+            nn.Dropout(hp.dropout),
+        )
+        self.blocks = nn.ModuleList(
+            [
+                PreNormResBlock(hp.hidden_dim, hp.inner_dim, hp.dropout)
+                for _ in range(hp.n_blocks)
+            ]
+        )
+        # Output head: head_dropout INCREASED from 0.08 to 0.15 (proven optimal)
+        self.output_head = nn.Sequential(
+            nn.LayerNorm(hp.hidden_dim),
+            nn.Dropout(hp.head_dropout),
+            nn.Linear(hp.hidden_dim, N_GENES * N_CLASSES),
+        )
+
+        # Class-level additive bias: one offset per class ONLY (3 params)
+        # CHANGED: replaced per-gene bias [N_GENES, N_CLASSES] (19,920 params) with
+        # class-level bias [N_CLASSES] (3 params) to eliminate primary memorization source.
+        # This allows class-level calibration without per-gene memorization.
+        self.class_bias = nn.Parameter(torch.zeros(N_CLASSES))
+
+        # ---- Class weights (CORRECT ordering after +1 label shift) ----
+        # class 0 = down-regulated  (4.77%)  -> high weight
+        # class 1 = neutral         (92.82%) -> low weight
+        # class 2 = up-regulated    (2.41%)  -> highest weight
+        freq = torch.tensor([0.0477, 0.9282, 0.0241], dtype=torch.float32)
+        class_weights = (1.0 / freq) / (1.0 / freq).mean()
+        self.register_buffer("class_weights", class_weights)
+
+        # Cast trainable params to float32 for stable optimization
+        for k, v in self.named_parameters():
+            if v.requires_grad:
+                v.data = v.data.float()
+
+        total = sum(p.numel() for p in self.parameters())
+        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        self.print(
+            f"Architecture: STRING_GNN({GNN_DIM}) -> Proj -> "
+            f"{hp.n_blocks}xPreNormResBlock({hp.hidden_dim},{hp.inner_dim}) "
+            f"-> HeadDropout({hp.head_dropout}) -> Linear({hp.hidden_dim},{N_GENES}x{N_CLASSES}) + class_bias[3]"
+        )
+        self.print(f"Trainable params: {trainable:,} / {total:,}")
+        self.print(f"FOCAL LOSS: gamma={hp.focal_gamma} (DECREASED from parent 2.5 back to 2.0)")
+        self.print(
+            f"LR SCHEDULE: CosineAnnealingWarmRestarts "
+            f"T_0={hp.cosine_t0}, T_mult={hp.cosine_t_mult}, eta_min={hp.cosine_eta_min}"
+        )
+        self.print(f"WEIGHT DECAY: {hp.weight_decay} (INCREASED from parent 0.02 to 0.06)")
+        self.print(f"HEAD DROPOUT: {hp.head_dropout} (INCREASED from parent 0.08 to 0.15)")
+        self.print(f"MANIFOLD MIXUP: alpha={hp.mixup_alpha}, prob={hp.mixup_prob}")
+        self.print(f"GENE BIAS: REMOVED (replaced class_bias[3] for anti-memorization)")
+
+    # ------------------------------------------------------------------
+    def _get_gene_emb(self, pert_ids: List[str]) -> torch.Tensor:
+        """Batch lookup of frozen STRING_GNN embeddings for ENSG IDs.
+
+        Genes absent from STRING_GNN (~7% of samples) receive a zero vector.
+        """
+        emb_list: List[torch.Tensor] = []
+        for pid in pert_ids:
+            row = self.gnn_id_to_idx.get(pid)
+            if row is not None:
+                emb_list.append(self.gnn_embeddings[row])
+            else:
+                emb_list.append(
+                    torch.zeros(GNN_DIM, device=self.device, dtype=torch.float32)
+                )
+        return torch.stack(emb_list, dim=0)  # [B, 256]
+
+    def _forward_from_emb(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass from STRING embedding [B, 256] to logits [B, 3, N_GENES]."""
+        x = self.input_proj(x)     # [B, 384]
+        for block in self.blocks:
+            x = block(x)           # [B, 384]
+        logits = self.output_head(x)                    # [B, N_GENES * N_CLASSES]
+        logits = logits.view(-1, N_CLASSES, N_GENES)    # [B, 3, 6640]
+        # class_bias: [N_CLASSES] -> [1, N_CLASSES, 1] broadcast over B and N_GENES
+        # This is a class-level bias only (3 params) instead of per-gene (19920 params)
+        logits = logits + self.class_bias.view(1, N_CLASSES, 1)
+        return logits
+
+    def forward(self, pert_ids: List[str]) -> torch.Tensor:
+        """Return logits of shape [B, N_CLASSES, N_GENES]."""
+        x = self._get_gene_emb(pert_ids)  # [B, 256]
+        return self._forward_from_emb(x)
+
+    def _manifold_mixup(
+        self,
+        x: torch.Tensor,
+        labels: torch.Tensor,
+    ):
+        """Apply Manifold Mixup in the hidden space (after input projection).
+
+        Interpolates pairs of hidden representations and their labels.
+        Returns (mixed_x, labels_a, labels_b, lam) for mixed loss calculation.
+
+        x:      [B, hidden_dim] -- hidden representation (after input_proj)
+        labels: [B, N_GENES]   -- integer class labels in {0, 1, 2}
+        """
+        hp = self.hparams
+        if self.training and np.random.random() < hp.mixup_prob:
+            lam = np.random.beta(hp.mixup_alpha, hp.mixup_alpha)
+            # Clamp lambda to a safe range to avoid degenerate mixes
+            lam = max(lam, 1 - lam)  # Always take the larger weight
+            batch_size = x.size(0)
+            index = torch.randperm(batch_size, device=x.device)
+            mixed_x = lam * x + (1 - lam) * x[index]
+            return mixed_x, labels, labels[index], lam
+        else:
+            return x, labels, labels, 1.0
+
+    def _compute_loss(
+        self,
+        logits: torch.Tensor,
+        labels: torch.Tensor,
+        labels_b: Optional[torch.Tensor] = None,
+        lam: float = 1.0,
+    ) -> torch.Tensor:
+        """Focal loss on [B, N_CLASSES, N_GENES] logits.
+
+        Supports Manifold Mixup via optional labels_b and lam:
+        loss = lam * focal(logits, labels_a) + (1-lam) * focal(logits, labels_b)
+
+        Focal loss (gamma=2.0) -- DECREASED from parent's gamma=2.5.
+
+        With gamma=2.0:
+        - Easy samples (p_t=0.95): factor = (0.05)^2.0 = 0.0025x base weight
+        - Hard samples (p_t=0.20): factor = (0.80)^2.0 = 0.640x base weight
+        - 4.5x LESS suppression of easy samples vs gamma=2.5 -> better generalization
+        """
+        hp = self.hparams
+
+        def _focal_loss_single(lgts, lbls):
+            logits_flat = lgts.permute(0, 2, 1).reshape(-1, N_CLASSES).float()
+            labels_flat = lbls.reshape(-1)
+
+            if hp.focal_gamma == 0.0:
+                return F.cross_entropy(
+                    logits_flat,
+                    labels_flat,
+                    weight=self.class_weights,
+                    label_smoothing=hp.label_smoothing,
+                )
+
+            # Focal loss: FL(p_t) = -(1 - p_t)^gamma * w_c * log(p_t)
+            ce_per_sample = F.cross_entropy(
+                logits_flat,
+                labels_flat,
+                weight=self.class_weights,
+                reduction="none",
+                label_smoothing=hp.label_smoothing,
+            )
+            with torch.no_grad():
+                probs = F.softmax(logits_flat, dim=-1)
+                pt = probs.gather(1, labels_flat.unsqueeze(1)).squeeze(1)
+            focal_weight = (1.0 - pt.clamp(min=1e-8)) ** hp.focal_gamma
+            return (focal_weight * ce_per_sample).mean()
+
+        loss_a = _focal_loss_single(logits, labels)
+
+        if labels_b is not None and lam < 1.0:
+            loss_b = _focal_loss_single(logits, labels_b)
+            return lam * loss_a + (1.0 - lam) * loss_b
+
+        return loss_a
+
+    # ------------------------------------------------------------------
+    # Training / Validation / Test steps
+    # ------------------------------------------------------------------
+    def training_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
+        pert_ids = batch["pert_id"]
+        labels = batch["label"]
+
+        # Get STRING_GNN embedding
+        x = self._get_gene_emb(pert_ids)  # [B, 256]
+
+        # Apply input projection to get hidden representation
+        x = self.input_proj(x)  # [B, hidden_dim]
+
+        # Apply Manifold Mixup in the hidden (MLP input) space
+        x, labels_a, labels_b, lam = self._manifold_mixup(x, labels)
+
+        # Continue forward pass from hidden representation
+        for block in self.blocks:
+            x = block(x)                                # [B, hidden_dim]
+        logits = self.output_head(x)                    # [B, N_GENES * N_CLASSES]
+        logits = logits.view(-1, N_CLASSES, N_GENES)    # [B, 3, 6640]
+        logits = logits + self.class_bias.view(1, N_CLASSES, 1)
+
+        # Compute mixup loss
+        loss = self._compute_loss(logits, labels_a, labels_b, lam)
+
+        self.log(
+            "train/loss", loss, on_step=True, on_epoch=True,
+            prog_bar=True, sync_dist=True,
+        )
+        return loss
+
+    def validation_step(self, batch: Dict[str, Any], batch_idx: int) -> None:
+        logits = self(batch["pert_id"])
+        loss = self._compute_loss(logits, batch["label"])
+        self.log(
+            "val/loss", loss, on_step=False, on_epoch=True,
+            prog_bar=True, sync_dist=True,
+        )
+        self._val_preds.append(logits.detach().cpu().float())
+        self._val_labels.append(batch["label"].detach().cpu())
+
+    def on_validation_epoch_end(self) -> None:
+        if not self._val_preds:
+            return
+
+        preds_local = torch.cat(self._val_preds, dim=0)    # [N_local, 3, 6640]
+        labels_local = torch.cat(self._val_labels, dim=0)  # [N_local, 6640]
+        self._val_preds.clear()
+        self._val_labels.clear()
+
+        # Gather predictions and labels from all ranks before computing F1.
+        # Each rank only sees a subset of the validation data in DDP, so we must
+        # gather ALL predictions globally to compute the correct per-gene F1.
+        is_dist = dist.is_available() and dist.is_initialized()
+        if is_dist:
+            world_size = dist.get_world_size()
+            # Gather prediction tensors across all ranks
+            gathered_preds = self.all_gather(preds_local)   # [world_size, N_local, 3, 6640]
+            gathered_labels = self.all_gather(labels_local) # [world_size, N_local, 6640]
+            all_preds = gathered_preds.view(-1, N_CLASSES, N_GENES)   # [N_total, 3, 6640]
+            all_labels = gathered_labels.view(-1, N_GENES)            # [N_total, 6640]
+            # Compute F1 on the full validation set. all_gather gives identical
+            # data to all ranks, so computed F1 is identical on every rank.
+            f1 = _compute_per_gene_f1(
+                all_preds.cpu().numpy(), all_labels.cpu().numpy()
+            )
+            # sync_dist=True averages identical values across ranks — result unchanged.
+            self.log("val_f1", f1, prog_bar=True, sync_dist=True)
+        else:
+            f1 = _compute_per_gene_f1(preds_local.numpy(), labels_local.numpy())
+            self.log("val_f1", f1, prog_bar=True)
+
+    def test_step(self, batch: Dict[str, Any], batch_idx: int) -> None:
+        logits = self(batch["pert_id"])
+        self._test_preds.append(logits.detach().cpu().float())
+        self._test_pert_ids.extend(batch["pert_id"])
+        self._test_symbols.extend(batch["symbol"])
+
+    def on_test_epoch_end(self) -> None:
+        preds_local = torch.cat(self._test_preds, dim=0)  # [N_local, 3, 6640]
+        self._test_preds.clear()
+
+        # self.all_gather is Lightning's DDP-safe wrapper -- called on all ranks.
+        gathered = self.all_gather(preds_local)  # [world_size, N_local, 3, 6640]
+        all_preds = gathered.view(-1, N_CLASSES, N_GENES)  # [N_total, 3, 6640]
+
+        # Gather string metadata via dist.all_gather_object (torch collective).
+        is_dist = dist.is_available() and dist.is_initialized()
+        world_size = dist.get_world_size() if is_dist else 1
+        local_pert_ids = list(self._test_pert_ids)
+        local_symbols = list(self._test_symbols)
+        self._test_pert_ids.clear()
+        self._test_symbols.clear()
+
+        gathered_pert_ids_list: List[List[str]] = [local_pert_ids]
+        gathered_symbols_list: List[List[str]] = [local_symbols]
+        if is_dist:
+            obj_pids = [None] * world_size
+            obj_syms = [None] * world_size
+            dist.all_gather_object(obj_pids, local_pert_ids)
+            dist.all_gather_object(obj_syms, local_symbols)
+            gathered_pert_ids_list = obj_pids
+            gathered_symbols_list = obj_syms
+
+        if self.trainer.is_global_zero:
+            all_pert_ids = [pid for lst in gathered_pert_ids_list for pid in lst]
+            all_symbols = [sym for lst in gathered_symbols_list for sym in lst]
+
+            # De-duplicate (DDP may replicate samples across ranks)
+            seen: set = set()
+            dedup_ids, dedup_syms, dedup_preds = [], [], []
+            preds_np = all_preds.cpu().numpy()  # [N_total, 3, 6640]
+            for i, pid in enumerate(all_pert_ids):
+                if pid not in seen:
+                    seen.add(pid)
+                    dedup_ids.append(pid)
+                    dedup_syms.append(all_symbols[i])
+                    dedup_preds.append(preds_np[i])
+
+            # Store for saving in main()
+            self._current_test_preds = np.stack(dedup_preds, axis=0)
+            self._current_test_ids = dedup_ids
+            self._current_test_syms = dedup_syms
+
+    # ------------------------------------------------------------------
+    # Optimizer / Scheduler
+    # ------------------------------------------------------------------
+    def configure_optimizers(self):
+        from muon import MuonWithAuxAdam
+
+        hp = self.hparams
+
+        # Separate parameters for Muon vs AdamW:
+        # Muon: 2D weight matrices in the hidden residual blocks
+        # AdamW: all other parameters (norms, biases, input_proj, output_head, class_bias)
+        muon_params = [
+            p for name, p in self.blocks.named_parameters()
+            if p.ndim >= 2 and p.requires_grad
+        ]
+        # All other trainable params go to AdamW
+        muon_param_ids = set(id(p) for p in muon_params)
+        adamw_params = [
+            p for p in self.parameters()
+            if p.requires_grad and id(p) not in muon_param_ids
+        ]
+
+        param_groups = [
+            # Muon group for hidden block weight matrices
+            dict(
+                params=muon_params,
+                use_muon=True,
+                lr=hp.muon_lr,
+                weight_decay=hp.weight_decay,
+                momentum=0.95,
+            ),
+            # AdamW group for embeddings, norms, biases, head
+            dict(
+                params=adamw_params,
+                use_muon=False,
+                lr=hp.adamw_lr,
+                betas=(0.9, 0.95),
+                weight_decay=hp.weight_decay,
+            ),
+        ]
+
+        optimizer = MuonWithAuxAdam(param_groups)
+
+        # CosineAnnealingWarmRestarts with SHORTER T_0=40 (vs parent's 80).
+        # T_0=40: first restart at epoch 40, second at epoch 120, third at 280.
+        # More frequent restarts keep the model closer to well-regularized region
+        # and provide more LR diversity to explore different optimization basins.
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer,
+            T_0=hp.cosine_t0,
+            T_mult=hp.cosine_t_mult,
+            eta_min=hp.cosine_eta_min,
+        )
+
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "epoch",
+                "frequency": 1,
+            },
+        }
+
+    # ------------------------------------------------------------------
+    # Checkpoint helpers: save only trainable params + buffers
+    # ------------------------------------------------------------------
+    def state_dict(self, destination=None, prefix="", keep_vars=False):
+        full_state_dict = super().state_dict(destination=destination, prefix=prefix, keep_vars=keep_vars)
+
+        trainable_state_dict = {}
+        for name, param in self.named_parameters():
+            if param.requires_grad:
+                key = prefix + name
+                if key in full_state_dict:
+                    trainable_state_dict[key] = full_state_dict[key]
+
+        for name, buffer in self.named_buffers():
+            key = prefix + name
+            if key in full_state_dict:
+                trainable_state_dict[key] = full_state_dict[key]
+
+        total_params = sum(p.numel() for p in self.parameters())
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        total_buffers = sum(b.numel() for _, b in self.named_buffers())
+        self.print(
+            f"Saving checkpoint: {trainable_params}/{total_params} params "
+            f"({100 * trainable_params / total_params:.2f}%), plus {total_buffers} buffer values"
+        )
+
+        return trainable_state_dict
+
+    def load_state_dict(self, state_dict, strict=True):
+        full_state_keys = set(super().state_dict().keys())
+        trainable_keys = {
+            name for name, param in self.named_parameters() if param.requires_grad
+        }
+        buffer_keys = {
+            name for name, _ in self.named_buffers() if name in full_state_keys
+        }
+        expected_keys = trainable_keys | buffer_keys
+
+        missing_keys = [k for k in expected_keys if k not in state_dict]
+        unexpected_keys = [k for k in state_dict if k not in expected_keys]
+
+        if missing_keys:
+            self.print(f"Warning: Missing checkpoint keys: {missing_keys[:5]}...")
+        if unexpected_keys:
+            self.print(f"Warning: Unexpected keys in checkpoint: {unexpected_keys[:5]}...")
+
+        loaded_trainable = len([k for k in state_dict if k in trainable_keys])
+        loaded_buffers = len([k for k in state_dict if k in buffer_keys])
+        self.print(
+            f"Loading checkpoint: {loaded_trainable} trainable parameters and "
+            f"{loaded_buffers} buffers"
+        )
+
+        return super().load_state_dict(state_dict, strict=False)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def _compute_per_gene_f1(preds: np.ndarray, labels: np.ndarray) -> float:
+    """Per-gene macro-averaged F1 exactly matching calc_metric.py.
+
+    preds  : [N_samples, 3, N_genes]  -- logits / class scores
+    labels : [N_samples, N_genes]     -- integer class labels in {0, 1, 2}
+    """
+    from sklearn.metrics import f1_score as sk_f1
+
+    y_hat = preds.argmax(axis=1)  # [N_samples, N_genes]
+    n_genes = labels.shape[1]
+    f1_vals = []
+    for g in range(n_genes):
+        yt = labels[:, g]
+        yh = y_hat[:, g]
+        per_class_f1 = sk_f1(
+            yt, yh, labels=[0, 1, 2], average=None, zero_division=0
+        )
+        present = np.array([(yt == c).any() for c in [0, 1, 2]])
+        f1_vals.append(float(per_class_f1[present].mean()))
+    return float(np.mean(f1_vals))
+
+
+def _save_test_predictions(
+    pert_ids: List[str],
+    symbols: List[str],
+    preds: np.ndarray,
+    out_path: Path,
+) -> None:
+    """Save test predictions in the TSV format required by calc_metric.py."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    assert len(pert_ids) == len(preds), (
+        f"Length mismatch: {len(pert_ids)} pert_ids vs {len(preds)} pred rows"
+    )
+    rows = [
+        {
+            "idx": pert_ids[i],
+            "input": symbols[i],
+            "prediction": json.dumps(preds[i].tolist()),  # [3, 6640] as JSON
+        }
+        for i in range(len(pert_ids))
+    ]
+    pd.DataFrame(rows).to_csv(out_path, sep="\t", index=False)
+    print(f"Saved {len(rows)} test predictions -> {out_path}")
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description=(
+            "Node1-2-2: STRING_GNN + 3-Block MLP (h=384) + Muon(lr=0.01) + "
+            "FocalLoss(gamma=2.0) + CosineWR(T_0=40) + ManifoldMixup + "
+            "Aggressive Regularization (wd=0.06, head_dropout=0.15, no gene_bias)"
+        )
+    )
+    p.add_argument("--micro-batch-size", type=int, default=64)
+    p.add_argument("--global-batch-size", type=int, default=512)
+    p.add_argument("--max-epochs", type=int, default=300,
+                   help="Reduced budget with better regularization (parent ran 431 with poor reg)")
+    p.add_argument("--muon-lr", type=float, default=0.01)
+    p.add_argument("--adamw-lr", type=float, default=3e-4)
+    p.add_argument("--weight-decay", type=float, default=0.06,
+                   help="Weight decay for both Muon and AdamW (INCREASED from parent 0.02 to 0.06)")
+    p.add_argument("--label-smoothing", type=float, default=0.0)
+    p.add_argument("--focal-gamma", type=float, default=2.0,
+                   help="Focal loss gamma (DECREASED from parent 2.5 to 2.0 to reduce overfitting)")
+    p.add_argument("--dropout", type=float, default=0.30)
+    p.add_argument("--head-dropout", type=float, default=0.15,
+                   help="Head dropout (INCREASED from parent 0.08 to 0.15, proven optimal)")
+    p.add_argument("--hidden-dim", type=int, default=384)
+    p.add_argument("--inner-dim", type=int, default=768)
+    p.add_argument("--n-blocks", type=int, default=3)
+    p.add_argument("--cosine-t0", type=int, default=40,
+                   help="CosineAnnealingWR T_0: SHORTENED from 80 to 40 for more frequent restarts")
+    p.add_argument("--cosine-t-mult", type=int, default=2,
+                   help="CosineAnnealingWR T_mult: cycle doubling factor")
+    p.add_argument("--cosine-eta-min", type=float, default=1e-7,
+                   help="CosineAnnealingWR minimum LR")
+    p.add_argument("--grad-clip-norm", type=float, default=2.0)
+    p.add_argument("--early-stop-patience", type=int, default=20,
+                   help="REDUCED from parent 50 to 20 to stop closer to test-optimal")
+    p.add_argument("--save-top-k", type=int, default=3,
+                   help="Number of best checkpoints to save")
+    p.add_argument("--mixup-alpha", type=float, default=0.2,
+                   help="Manifold Mixup Beta distribution alpha parameter")
+    p.add_argument("--mixup-prob", type=float, default=0.5,
+                   help="Probability of applying Manifold Mixup per batch")
+    p.add_argument("--num-workers", type=int, default=4)
+    p.add_argument("--debug_max_step", type=int, default=None)
+    p.add_argument("--fast_dev_run", action="store_true")
+    p.add_argument("--val_check_interval", type=float, default=1.0)
+    return p.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    pl.seed_everything(0)
+
+    data_dir = Path(__file__).parent.parent.parent / "data"
+    output_dir = Path(__file__).parent / "run"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # ------------------------------------------------------------------
+    # DataModule
+    # ------------------------------------------------------------------
+    datamodule = PerturbDataModule(
+        train_path=str(data_dir / "train.tsv"),
+        val_path=str(data_dir / "val.tsv"),
+        test_path=str(data_dir / "test.tsv"),
+        micro_batch_size=args.micro_batch_size,
+        num_workers=args.num_workers,
+    )
+
+    # ------------------------------------------------------------------
+    # Model
+    # ------------------------------------------------------------------
+    model = PerturbModule(
+        hidden_dim=args.hidden_dim,
+        inner_dim=args.inner_dim,
+        n_blocks=args.n_blocks,
+        dropout=args.dropout,
+        head_dropout=args.head_dropout,
+        muon_lr=args.muon_lr,
+        adamw_lr=args.adamw_lr,
+        weight_decay=args.weight_decay,
+        label_smoothing=args.label_smoothing,
+        focal_gamma=args.focal_gamma,
+        cosine_t0=args.cosine_t0,
+        cosine_t_mult=args.cosine_t_mult,
+        cosine_eta_min=args.cosine_eta_min,
+        grad_clip_norm=args.grad_clip_norm,
+        mixup_alpha=args.mixup_alpha,
+        mixup_prob=args.mixup_prob,
+    )
+
+    # ------------------------------------------------------------------
+    # Trainer configuration
+    # ------------------------------------------------------------------
+    n_gpus = int(os.environ.get("WORLD_SIZE", torch.cuda.device_count()))
+    accumulate = max(1, args.global_batch_size // (args.micro_batch_size * n_gpus))
+
+    fast_dev_run = args.fast_dev_run
+    if args.debug_max_step is not None:
+        limit_train = limit_val = limit_test = args.debug_max_step
+        max_steps = args.debug_max_step
+        val_check_interval = 1.0
+        num_sanity_val_steps = 0
+    else:
+        limit_train = limit_val = limit_test = 1.0
+        max_steps = -1
+        val_check_interval = args.val_check_interval
+        num_sanity_val_steps = 2
+
+    # Save top-3 checkpoints; use best single checkpoint for test.
+    checkpoint_cb = ModelCheckpoint(
+        dirpath=str(output_dir / "checkpoints"),
+        filename="best-{epoch:03d}-{val_f1:.4f}",
+        monitor="val_f1",
+        mode="max",
+        save_top_k=args.save_top_k,
+        save_last=True,
+        auto_insert_metric_name=False,
+    )
+    # patience=20: aggressive stopping, stops closer to true test-optimal
+    # (parent's patience=50 allowed 50 overfitting epochs after best checkpoint)
+    early_stop_cb = EarlyStopping(
+        monitor="val_f1",
+        mode="max",
+        patience=args.early_stop_patience,
+        min_delta=1e-5,
+    )
+    lr_monitor = LearningRateMonitor(logging_interval="epoch")
+    progress_bar = TQDMProgressBar(refresh_rate=20)
+
+    callbacks = [checkpoint_cb, early_stop_cb, lr_monitor, progress_bar]
+
+    csv_logger = CSVLogger(save_dir=str(output_dir / "logs"), name="csv_logs")
+    tb_logger = TensorBoardLogger(
+        save_dir=str(output_dir / "logs"), name="tensorboard_logs"
+    )
+
+    trainer = pl.Trainer(
+        accelerator="gpu",
+        devices=n_gpus,
+        num_nodes=1,
+        strategy=DDPStrategy(
+            find_unused_parameters=True,
+            timeout=timedelta(seconds=120),
+        ),
+        precision="bf16-mixed",
+        max_epochs=args.max_epochs,
+        max_steps=max_steps,
+        accumulate_grad_batches=accumulate,
+        limit_train_batches=limit_train,
+        limit_val_batches=limit_val,
+        limit_test_batches=limit_test,
+        val_check_interval=val_check_interval if (
+            args.debug_max_step is None and not fast_dev_run
+        ) else 1.0,
+        num_sanity_val_steps=num_sanity_val_steps,
+        callbacks=callbacks,
+        logger=[csv_logger, tb_logger],
+        log_every_n_steps=10,
+        gradient_clip_val=args.grad_clip_norm,
+        deterministic=True,
+        default_root_dir=str(output_dir),
+        fast_dev_run=fast_dev_run,
+    )
+
+    # ------------------------------------------------------------------
+    # Train
+    # ------------------------------------------------------------------
+    trainer.fit(model, datamodule=datamodule)
+
+    # ------------------------------------------------------------------
+    # Test: Use best single checkpoint
+    # ------------------------------------------------------------------
+    if args.fast_dev_run or args.debug_max_step is not None:
+        print("\n=== DEBUG MODE: Single checkpoint test ===")
+        trainer.test(model, datamodule=datamodule)
+    else:
+        print("\n=== PRODUCTION MODE: Testing with best checkpoint ===")
+        trainer.test(model, datamodule=datamodule, ckpt_path='best')
+
+    # Save test predictions
+    if trainer.is_global_zero:
+        if hasattr(model, '_current_test_preds'):
+            out_path = output_dir / "test_predictions.tsv"
+            _save_test_predictions(
+                pert_ids=model._current_test_ids,
+                symbols=model._current_test_syms,
+                preds=model._current_test_preds,
+                out_path=out_path,
+            )
+            print(f"Test predictions saved -> {out_path}")
+        else:
+            print("WARNING: No test predictions to save.")
+
+        # Save test results placeholder
+        score_path = Path(__file__).parent / "test_score.txt"
+        score_path.write_text(json.dumps({"status": "test_complete_awaiting_eval"}, indent=2))
+        print(f"Test results placeholder saved -> {score_path}")
+
+
+if __name__ == "__main__":
+    main()
